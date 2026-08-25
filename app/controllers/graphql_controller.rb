@@ -1,0 +1,62 @@
+# frozen_string_literal: true
+
+class GraphqlController < ApplicationController
+  # If accessing from outside this domain, nullify the session
+  # This allows for outside API access while preventing CSRF attacks,
+  # but you'll have to authenticate your user separately
+  # protect_from_forgery with: :null_session
+
+  def execute
+    variables = prepare_variables(params[:variables])
+    query = params[:query]
+    operation_name = params[:operationName]
+    token_user = current_user_from_token
+    Current.user = token_user if token_user
+    context = { current_user: token_user }
+    result = EcommerceRailsSchema.execute(query, variables: variables, context: context, operation_name: operation_name)
+    render json: result
+  rescue StandardError => e
+    raise e unless Rails.env.development?
+    handle_error_in_development(e)
+  end
+
+  private
+
+  # No bloquea requests sin token: las queries públicas del catálogo no
+  # necesitan usuario. Un token ausente o inválido simplemente deja
+  # current_user en nil, no corta la request.
+  def current_user_from_token
+    token = request.headers["Authorization"]&.split(" ")&.last
+    return nil if token.blank?
+
+    payload = JsonWebToken.decode(token)
+    User.find_by(id: payload&.dig(:user_id))
+  end
+
+  # Handle variables in form data, JSON body, or a blank value
+  def prepare_variables(variables_param)
+    case variables_param
+    when String
+      if variables_param.present?
+        JSON.parse(variables_param) || {}
+      else
+        {}
+      end
+    when Hash
+      variables_param
+    when ActionController::Parameters
+      variables_param.to_unsafe_hash # GraphQL-Ruby will validate name and type of incoming variables.
+    when nil
+      {}
+    else
+      raise ArgumentError, "Unexpected parameter: #{variables_param}"
+    end
+  end
+
+  def handle_error_in_development(e)
+    logger.error e.message
+    logger.error e.backtrace.join("\n")
+
+    render json: { errors: [{ message: e.message, backtrace: e.backtrace }], data: {} }, status: 500
+  end
+end
